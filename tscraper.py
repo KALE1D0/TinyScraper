@@ -43,10 +43,10 @@ class TinySerializer:
 		for index in self.index:
 			if not index["finished"]:
 				handler(index)
+		return self
 	
 	def saveIndex(self):
 		json.dump(self.index, io.open('.index', 'w', encoding='utf-8'))
-		return
 	
 	def appendIndex(self, element):
 		for elem in self.index:
@@ -54,7 +54,6 @@ class TinySerializer:
 				element["finished"] = True
 				return
 		self.index.append(element)
-		return
 
 	def appendContent(self, element):
 		title = element["title"]
@@ -63,12 +62,10 @@ class TinySerializer:
 			if ch in TinySerializer.charset:
 				filename += ch
 		path = os.path.join("contents", filename + ".txt")
-		print("Writing to file: " + path)
 		json.dump(element, open(path, "w+"))
-		return
 	
 class TinyScraper:
-	def __init__(self, pool_size = 10, sleep_time = 1, fetcher = TinyFetcher, serializer = TinySerializer):
+	def __init__(self, pool_size = 5, sleep_time = 1, fetcher = TinyFetcher, serializer = TinySerializer):
 		self.threadLimit = pool_size
 		self.sleepTime = sleep_time
 		self.threadCounter = 0
@@ -79,6 +76,7 @@ class TinyScraper:
 		self.serializer = serializer()
 		self.tasks = Queue()
 		self.lock = threading.Lock()
+		self.threads = {}
 
 	def start(self):
 		self.serializer.readIndex().recover(self.tasks.put)
@@ -88,18 +86,25 @@ class TinyScraper:
 			while not self.tasks.empty():
 				task = self.tasks.get()
 				with self.lock:
-					if (not task["finished"]) and (self.threadCounter < self.threadLimit):
+					if (not task["finished"]) and (len(self.threads) < self.threadLimit):
 						fetcher = threading.Thread(target = self.fetcher.fetchContent, args = (task, self.serializer.appendContent, self.release, ))
+						fetcher.reboot = False
 						fetcher.start()
-						self.threadCounter += 1
-						print("Thread++, " + str(self.threadCounter) + " threads left...")
+						self.threads[fetcher] = 0
+						print("[" + str(fetcher.name) + "] has started!!!")
 			self.serializer.saveIndex()
 			time.sleep(self.sleepTime)
+			for thread in self.threads:
+				self.threads[thread] += 1
+				if self.threads[thread] > 180:
+					thread.reboot = True
 
 	def release(self, element):
 		with self.lock:
-			self.threadCounter -= 1
-			print("Thread--, " + str(self.threadCounter) + " threads left...")
+			self.threads.pop(threading.current_thread())
+			if threading.current_thread().reboot:
+				self.tasks.put(element)
+			print("[" + threading.current_thread().name + "] has stopped...")
 		
 class QuoraFetcher(TinyFetcher):
 	def fetchIndex(self, appender, handler):
@@ -116,11 +121,9 @@ class QuoraFetcher(TinyFetcher):
 	def fetchContent(self, index, appender, handler):
 		retry_limit = 3
 		wait_time = 7
-		# print("Fetching question: " + index["title"])
+		print("Fetching question: " + index["title"])
 		driver = self.load("https://www.quora.com/" + index["link"])
 		soup = BeautifulSoup(driver.page_source, "lxml")
-		# print(soup.find("div", class_="answer_count").text.split(" ")[0].split("+")[0] + " answers detected...")
-		if soup.find("div", class_="answer_count")
 		try:
 			ans_num_tot = int(soup.find("div", class_="answer_count").text.split(" ")[0].split("+")[0])
 		except:
@@ -129,6 +132,10 @@ class QuoraFetcher(TinyFetcher):
 		attempt = {0 : 0}
 		
 		while ans_num_fetchable < ans_num_tot:
+			if threading.current_thread().reboot:
+				driver.quit()
+				handler(index)
+				return
 			if attempt[ans_num_fetchable] > retry_limit:
 				break
 			soup = BeautifulSoup(driver.page_source, "lxml")
@@ -137,7 +144,6 @@ class QuoraFetcher(TinyFetcher):
 			for ans in answer_list:
 				if ans.find("a", class_="user"):
 					ans_num_fetchable += 1
-			# print(str(ans_num_fetchable) + " answers fetchable, loading more...")
 			try:
 				driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
 				time.sleep(wait_time)
@@ -164,8 +170,6 @@ class QuoraFetcher(TinyFetcher):
 				if ans.find("span", class_="meta_num"):
 					answer["view"] = ans.find("span", class_="meta_num").text
 				answer_list.append(answer)
-		# print(str(answer_num) + " answers fetched!!!")
-		# print("Fetch rate: " + str(ans_num_fetchable / ans_num_tot))
 		element = {}
 		element["title"] = index["title"]
 		element["link"] = index["link"]
@@ -173,6 +177,3 @@ class QuoraFetcher(TinyFetcher):
 		element["finished"] = True
 		driver.quit()
 		self.handleCallbacks(element, appender, handler)
-
-scraper = TinyScraper(fetcher = QuoraFetcher)
-scraper.start()
